@@ -112,7 +112,7 @@ class RobloxClient {
     }));
   }
 
-  async getBadges(userId, limit = 8) {
+  async getGameBadges(userId, limit = 8) {
     const data = await this.get(`https://badges.roblox.com/v1/users/${userId}/badges`, {
       limit,
       sortOrder: "Desc"
@@ -122,7 +122,6 @@ class RobloxClient {
     if (!badges.length) return [];
 
     const badgeIds = badges.map(b => b.id).filter(Boolean);
-
     let iconMap = new Map();
 
     try {
@@ -144,8 +143,43 @@ class RobloxClient {
       name: badge.name ?? null,
       description: badge.description ?? null,
       awarder: badge.awarder?.name ?? null,
-      iconUrl: iconMap.get(badge.id) || null
+      iconUrl: iconMap.get(badge.id) || null,
+      type: "game"
     }));
+  }
+
+  async getRobloxBadges(userId) {
+    const data = await this.get(`https://accountinformation.roblox.com/v1/users/${userId}/roblox-badges`);
+    const badges = Array.isArray(data) ? data : (data.robloxBadges || data.data || []);
+
+    return badges.map((badge, index) => ({
+      id: badge.id ?? `roblox-${index}`,
+      name: badge.name ?? null,
+      description: badge.description ?? null,
+      awarder: "Roblox",
+      iconUrl: badge.imageUrl ?? badge.iconImageUrl ?? badge.iconUrl ?? null,
+      type: "roblox"
+    }));
+  }
+
+  async getBadges(userId, limit = 8) {
+    const [gameBadges, robloxBadges] = await Promise.all([
+      safeCall(() => this.getGameBadges(userId, limit), []),
+      safeCall(() => this.getRobloxBadges(userId), [])
+    ]);
+
+    const merged = [];
+    const seen = new Set();
+
+    for (const badge of [...gameBadges, ...robloxBadges]) {
+      const key = `${badge.type}:${badge.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(badge);
+      if (merged.length >= limit) break;
+    }
+
+    return merged;
   }
 
   async getAvatarHeadshot(userId, size = "420x420") {
