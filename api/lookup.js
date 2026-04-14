@@ -160,102 +160,13 @@ class RobloxClient {
     return items.length ? items[0].imageUrl || null : null;
   }
 
-  async getWearingItems(userId) {
-    const wearing = await this.getCurrentlyWearing(userId);
-  
-    return {
-      assetIds: wearing.assetIds || []
-    };
-  }
-
-  async getAssetDetails(assetIds) {
-    if (!Array.isArray(assetIds) || !assetIds.length) return [];
-  
-    const ids = assetIds
-      .map(id => Number(id))
-      .filter(Number.isFinite)
-      .slice(0, 50);
-  
-    if (!ids.length) return [];
-  
-    const data = await this.post("https://catalog.roblox.com/v1/catalog/items/details", {
-      items: ids.map(id => ({
-        itemType: "Asset",
-        id
-      }))
-    });
-  
-    return (data.data || []).map(item => ({
-      id: item.id ?? null,
-      name: item.name ?? null,
-      creatorName: item.creatorName ?? null,
-      price: item.lowestPrice ?? null
-    }));
-  }
-
-  async getAssetThumbnails(assetIds) {
-    if (!Array.isArray(assetIds) || !assetIds.length) return new Map();
-
-    const ids = assetIds
-      .map(id => Number(id))
-      .filter(Number.isFinite)
-      .slice(0, 50);
-
-    if (!ids.length) return new Map();
-
-    const data = await this.get("https://thumbnails.roblox.com/v1/assets", {
-      assetIds: ids.join(","),
-      size: "250x250",
-      format: "Png",
-      returnPolicy: "PlaceHolder"
-    });
-
-    return new Map(
-      (data.data || []).map(item => [item.targetId, item.imageUrl || null])
-    );
+  async getCurrentlyWearing(userId) {
+    return this.get(`https://avatar.roblox.com/v1/users/${userId}/currently-wearing`);
   }
 
   async getWearingItems(userId) {
     const wearing = await this.getCurrentlyWearing(userId);
-    const assetIds = wearing.assetIds || [];
-  
-    if (!assetIds.length) {
-      return {
-        avatarType: wearing.avatarType ?? null,
-        scales: wearing.scales ?? null,
-        bodyColors: wearing.bodyColors ?? null,
-        assetIds: [],
-        items: []
-      };
-    }
-  
-    const [details, thumbMap] = await Promise.all([
-      safeCall(() => this.getAssetDetails(assetIds), []),
-      safeCall(() => this.getAssetThumbnails(assetIds), new Map())
-    ]);
-  
-    const detailMap = new Map(details.map(item => [item.id, item]));
-  
-    const items = assetIds.map(id => {
-      const numericId = Number(id);
-      const detail = detailMap.get(numericId) || {};
-  
-      return {
-        name: detail.name ?? null,
-        creatorName: detail.creatorName ?? null,
-        price: detail.price ?? null,
-        itemUrl: `https://www.roblox.com/catalog/${numericId}`,
-        thumbnailUrl: thumbMap.get(numericId) || null
-      };
-    });
-  
-    return {
-      avatarType: wearing.avatarType ?? null,
-      scales: wearing.scales ?? null,
-      bodyColors: wearing.bodyColors ?? null,
-      assetIds,
-      items
-    };
+    return wearing.assetIds || [];
   }
 
   async lookup(username) {
@@ -280,13 +191,7 @@ class RobloxClient {
       safeCall(() => this.getAvatarHeadshot(userId), null),
       safeCall(() => this.getGroups(userId), []),
       safeCall(() => this.getBadges(userId, 8), []),
-      safeCall(() => this.getWearingItems(userId), {
-        avatarType: null,
-        scales: null,
-        bodyColors: null,
-        assetIds: [],
-        items: []
-      })
+      safeCall(() => this.getWearingItems(userId), [])
     ]);
 
     return {
@@ -307,15 +212,9 @@ class RobloxClient {
         following: followingCount
       },
       avatar: {
-        headshotUrl,
-        avatarType: wearing.avatarType,
-        scales: wearing.scales,
-        bodyColors: wearing.bodyColors
+        headshotUrl
       },
-      wearing: {
-        assetIds: wearing.assetIds,
-        items: wearing.items
-      },
+      wearing,
       groups,
       badges
     };
