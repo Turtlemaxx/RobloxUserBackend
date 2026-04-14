@@ -160,8 +160,12 @@ class RobloxClient {
     return items.length ? items[0].imageUrl || null : null;
   }
 
-  async getCurrentlyWearing(userId) {
-    return this.get(`https://avatar.roblox.com/v1/users/${userId}/currently-wearing`);
+  async getWearingItems(userId) {
+    const wearing = await this.getCurrentlyWearing(userId);
+  
+    return {
+      assetIds: wearing.assetIds || []
+    };
   }
 
   async getAssetDetails(assetIds) {
