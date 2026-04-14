@@ -16,6 +16,14 @@ function isoToDaysOld(isoStr) {
   return Math.floor((Date.now() - date.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+async function safeCall(fn, fallback) {
+  try {
+    return await fn();
+  } catch {
+    return fallback;
+  }
+}
+
 class RobloxClient {
   constructor() {
     this.http = axios.create({
@@ -60,20 +68,15 @@ class RobloxClient {
     });
 
     const users = data.data || [];
-    if (!users.length) throw new RobloxLookupError(`Username not found: ${username}`);
+    if (!users.length) {
+      throw new RobloxLookupError(`Username not found: ${username}`);
+    }
+
     return users[0];
   }
 
   async getUserProfile(userId) {
     return this.get(`https://users.roblox.com/v1/users/${userId}`);
-  }
-
-  async getUsernameHistory(userId, limit = 50) {
-    const data = await this.get(`https://users.roblox.com/v1/users/${userId}/username-history`, {
-      limit,
-      sortOrder: "Asc"
-    });
-    return (data.data || []).map(x => x.name).filter(Boolean);
   }
 
   async getFriendCount(userId) {
@@ -109,17 +112,39 @@ class RobloxClient {
     }));
   }
 
-  async getBadges(userId, limit = 100) {
+  async getBadges(userId, limit = 8) {
     const data = await this.get(`https://badges.roblox.com/v1/users/${userId}/badges`, {
       limit,
-      sortOrder: "Asc"
+      sortOrder: "Desc"
     });
 
-    return (data.data || []).map(badge => ({
+    const badges = data.data || [];
+    if (!badges.length) return [];
+
+    const badgeIds = badges.map(b => b.id).filter(Boolean);
+
+    let iconMap = new Map();
+
+    try {
+      const thumbData = await this.get("https://thumbnails.roblox.com/v1/badges/icons", {
+        badgeIds: badgeIds.join(","),
+        size: "150x150",
+        format: "Png"
+      });
+
+      iconMap = new Map(
+        (thumbData.data || []).map(x => [x.targetId, x.imageUrl || null])
+      );
+    } catch {
+      iconMap = new Map();
+    }
+
+    return badges.map(badge => ({
       id: badge.id ?? null,
       name: badge.name ?? null,
       description: badge.description ?? null,
-      awarder: badge.awarder?.name ?? null
+      awarder: badge.awarder?.name ?? null,
+      iconUrl: iconMap.get(badge.id) || null
     }));
   }
 
@@ -139,52 +164,126 @@ class RobloxClient {
     return this.get(`https://avatar.roblox.com/v1/users/${userId}/currently-wearing`);
   }
 
-  async getCollectibles(userId, limit = 100) {
-    const data = await this.get(`https://inventory.roblox.com/v1/users/${userId}/assets/collectibles`, {
-      limit,
-      sortOrder: "Asc"
+  async getAssetDetails(assetIds) {
+    if (!Array.isArray(assetIds) || !assetIds.length) return [];
+  
+    const ids = assetIds
+      .map(id => Number(id))
+      .filter(Number.isFinite)
+      .slice(0, 50);
+  
+    if (!ids.length) return [];
+  
+    const data = await this.post("https://catalog.roblox.com/v1/catalog/items/details", {
+      items: ids.map(id => ({
+        itemType: "Asset",
+        id
+      }))
+    });
+  
+    return (data.data || []).map(item => ({
+      id: item.id ?? null,
+      name: item.name ?? null,
+      creatorName: item.creatorName ?? null,
+      price: item.lowestPrice ?? null
+    }));
+  }
+
+  async getAssetThumbnails(assetIds) {
+    if (!Array.isArray(assetIds) || !assetIds.length) return new Map();
+
+    const ids = assetIds
+      .map(id => Number(id))
+      .filter(Number.isFinite)
+      .slice(0, 50);
+
+    if (!ids.length) return new Map();
+
+    const data = await this.get("https://thumbnails.roblox.com/v1/assets", {
+      assetIds: ids.join(","),
+      size: "250x250",
+      format: "Png",
+      returnPolicy: "PlaceHolder"
     });
 
-    return (data.data || []).map(item => ({
-      assetId: item.assetId ?? null,
-      name: item.name ?? null,
-      serialNumber: item.serialNumber ?? null,
-      assetStock: item.assetStock ?? null,
-      recentAveragePrice: item.recentAveragePrice ?? null,
-      originalPrice: item.originalPrice ?? null,
-      buildersClubMembershipType: item.buildersClubMembershipType ?? null
-    }));
+    return new Map(
+      (data.data || []).map(item => [item.targetId, item.imageUrl || null])
+    );
+  }
+
+  async getWearingItems(userId) {
+    const wearing = await this.getCurrentlyWearing(userId);
+    const assetIds = wearing.assetIds || [];
+  
+    if (!assetIds.length) {
+      return {
+        avatarType: wearing.avatarType ?? null,
+        scales: wearing.scales ?? null,
+        bodyColors: wearing.bodyColors ?? null,
+        assetIds: [],
+        items: []
+      };
+    }
+  
+    const [details, thumbMap] = await Promise.all([
+      safeCall(() => this.getAssetDetails(assetIds), []),
+      safeCall(() => this.getAssetThumbnails(assetIds), new Map())
+    ]);
+  
+    const detailMap = new Map(details.map(item => [item.id, item]));
+  
+    const items = assetIds.map(id => {
+      const numericId = Number(id);
+      const detail = detailMap.get(numericId) || {};
+  
+      return {
+        name: detail.name ?? null,
+        creatorName: detail.creatorName ?? null,
+        price: detail.price ?? null,
+        itemUrl: `https://www.roblox.com/catalog/${numericId}`,
+        thumbnailUrl: thumbMap.get(numericId) || null
+      };
+    });
+  
+    return {
+      avatarType: wearing.avatarType ?? null,
+      scales: wearing.scales ?? null,
+      bodyColors: wearing.bodyColors ?? null,
+      assetIds,
+      items
+    };
   }
 
   async lookup(username) {
     const found = await this.usernameToUser(username);
     const userId = Number(found.id);
 
+    const profile = await this.getUserProfile(userId);
+    const created = profile.created ?? null;
+
     const [
-      profile,
-      usernameHistory,
       friendCount,
       followerCount,
       followingCount,
       headshotUrl,
-      currentlyWearing,
       groups,
       badges,
-      collectibles
+      wearing
     ] = await Promise.all([
-      this.getUserProfile(userId),
-      this.getUsernameHistory(userId),
-      this.getFriendCount(userId),
-      this.getFollowerCount(userId),
-      this.getFollowingCount(userId),
-      this.getAvatarHeadshot(userId),
-      this.getCurrentlyWearing(userId),
-      this.getGroups(userId),
-      this.getBadges(userId),
-      this.getCollectibles(userId)
+      safeCall(() => this.getFriendCount(userId), 0),
+      safeCall(() => this.getFollowerCount(userId), 0),
+      safeCall(() => this.getFollowingCount(userId), 0),
+      safeCall(() => this.getAvatarHeadshot(userId), null),
+      safeCall(() => this.getGroups(userId), []),
+      safeCall(() => this.getBadges(userId, 8), []),
+      safeCall(() => this.getWearingItems(userId), {
+        avatarType: null,
+        scales: null,
+        bodyColors: null,
+        assetIds: [],
+        items: []
+      })
     ]);
-
-    const created = profile.created ?? null;
 
     return {
       inputUsername: username,
@@ -198,7 +297,6 @@ class RobloxClient {
         accountAgeDays: isoToDaysOld(created),
         hasVerifiedBadge: profile.hasVerifiedBadge ?? null
       },
-      usernameHistory,
       socialCounts: {
         friends: friendCount,
         followers: followerCount,
@@ -206,14 +304,16 @@ class RobloxClient {
       },
       avatar: {
         headshotUrl,
-        currentlyWearingAssetIds: currentlyWearing.assetIds || [],
-        avatarType: currentlyWearing.avatarType ?? null,
-        scales: currentlyWearing.scales ?? null,
-        bodyColors: currentlyWearing.bodyColors ?? null
+        avatarType: wearing.avatarType,
+        scales: wearing.scales,
+        bodyColors: wearing.bodyColors
+      },
+      wearing: {
+        assetIds: wearing.assetIds,
+        items: wearing.items
       },
       groups,
-      badges,
-      collectibles
+      badges
     };
   }
 }
@@ -273,8 +373,8 @@ module.exports = async (req, res) => {
       const compareResult = await client.lookup(compare);
 
       const [aFriends, bFriends] = await Promise.all([
-        client.getFriends(result.resolvedUser.id),
-        client.getFriends(compareResult.resolvedUser.id)
+        safeCall(() => client.getFriends(result.resolvedUser.id), []),
+        safeCall(() => client.getFriends(compareResult.resolvedUser.id), [])
       ]);
 
       result.compare = {
